@@ -32,11 +32,12 @@ impl ChatWidget {
     /// The bottom pane only has one running flag, but this module treats it as a derived state of
     /// both the agent turn lifecycle and MCP startup lifecycle.
     pub(super) fn update_task_running_state(&mut self) {
-        self.bottom_pane.set_task_running(
-            self.turn_lifecycle.agent_turn_running
-                || self.review.is_review_mode
-                || self.mcp_startup_status.is_some(),
-        );
+        let agent_running = self.turn_lifecycle.agent_turn_running || self.review.is_review_mode;
+        if agent_running || self.mcp_startup_status.is_none() {
+            self.bottom_pane.set_task_running(agent_running);
+        } else {
+            self.bottom_pane.set_mcp_startup_running();
+        }
         if self.mcp_startup_status.is_some()
             && !self.turn_lifecycle.agent_turn_running
             && !self.review.is_review_mode

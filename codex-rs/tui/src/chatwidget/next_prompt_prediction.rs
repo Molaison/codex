@@ -6,7 +6,6 @@ use crate::next_prompt_prediction::PredictionTrigger;
 #[derive(Default)]
 pub(super) struct PredictionSchedule {
     attempted: Option<(ThreadId, String)>,
-    deferred: Option<(ThreadId, String, PredictionTrigger)>,
 }
 
 impl ChatWidget {
@@ -41,27 +40,8 @@ impl ChatWidget {
         {
             return;
         }
-        // History can arrive before the first MCP status. None then means startup
-        // has not reported yet, not that it finished. Wait for configured servers
-        // too, so their first Ready update cannot cancel an already queued request.
-        let awaiting_initial_mcp = !self.mcp_startup_ignore_updates_until_next_start
-            && self.mcp_startup_expected_servers.as_ref().map_or_else(
-                || {
-                    self.config
-                        .mcp_servers
-                        .get()
-                        .values()
-                        .any(|server| server.enabled)
-                },
-                |servers| !servers.is_empty(),
-            );
-        if self.mcp_startup_status.is_some() || awaiting_initial_mcp {
-            if self.bottom_pane.composer_is_empty() {
-                self.prediction_schedule.deferred = Some((thread_id, turn_id, trigger));
-            }
-            return;
-        }
-        self.prediction_schedule.deferred = None;
+        // Only the main turn, drafts, and interactive views gate this independent
+        // request. Cached MCP servers may never emit another startup notification.
         let Some((request_id, cancellation)) = self.bottom_pane.begin_next_prompt_prediction()
         else {
             return;
@@ -77,15 +57,6 @@ impl ChatWidget {
                     trigger,
                 },
             });
-    }
-
-    pub(super) fn retry_deferred_next_prompt_prediction(&mut self) {
-        if self.mcp_startup_status.is_none()
-            && let Some((thread_id, turn_id, trigger)) = self.prediction_schedule.deferred.take()
-            && self.thread_id == Some(thread_id)
-        {
-            self.maybe_request_next_prompt_prediction(turn_id, trigger);
-        }
     }
 
     pub(super) fn reset_next_prompt_prediction(&mut self) {
@@ -123,66 +94,53 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn next_prompt_prediction_waits_for_first_mcp_status_after_replay() {
+    async fn next_prompt_prediction_does_not_wait_for_cached_mcp_servers() {
         use codex_app_server_protocol::{
             McpServerStartupState, McpServerStatusUpdatedNotification,
         };
-        for expected_known in [false, true] {
-            let (mut widget, _, mut events, _) =
-                crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
-            let server: codex_config::types::McpServerConfig =
-                toml::from_str::<toml::Value>("command = 'true'")
-                    .unwrap()
-                    .try_into()
-                    .unwrap();
-            widget
-                .config
-                .mcp_servers
-                .set(HashMap::from([
-                    ("alpha".to_string(), server.clone()),
-                    ("beta".to_string(), server),
-                ]))
-                .unwrap();
-            widget.thread_id = Some(ThreadId::new());
-            widget.turn_lifecycle.last_turn_id = Some("completed-turn".into());
-            if expected_known {
-                widget.set_mcp_startup_expected_servers(["alpha".into(), "beta".into()]);
-            }
-            assert!(widget.mcp_startup_status.is_none());
-            widget.maybe_request_next_prompt_prediction(
-                "completed-turn".into(),
-                PredictionTrigger::CatchUp,
-            );
-            assert!(
-                !std::iter::from_fn(|| events.try_recv().ok())
-                    .any(|event| matches!(event, AppEvent::RequestNextPromptPrediction { .. })),
-                "history replay must wait even before the first MCP status arrives",
-            );
-            widget.set_mcp_startup_expected_servers(["alpha".into(), "beta".into()]);
-            let mut requests = Vec::new();
-            for name in ["alpha", "beta"] {
-                widget.on_mcp_server_status_updated(McpServerStatusUpdatedNotification {
-                    thread_id: widget.thread_id.map(|id| id.to_string()),
-                    name: name.into(),
-                    status: McpServerStartupState::Ready,
-                    error: None,
-                    failure_reason: None,
-                });
-                while let Ok(event) = events.try_recv() {
-                    if let AppEvent::RequestNextPromptPrediction { request } = event {
-                        requests.push(request);
-                    }
+        let (mut widget, _, mut events, _) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        widget.thread_id = Some(ThreadId::new());
+        widget.turn_lifecycle.last_turn_id = Some("completed-turn".into());
+        // A cached server has no new startup event when attaching to the daemon.
+        widget.set_mcp_startup_expected_servers(["cached".into(), "remote".into()]);
+        widget.on_mcp_server_status_updated(McpServerStatusUpdatedNotification {
+            thread_id: widget.thread_id.map(|id| id.to_string()),
+            name: "remote".into(),
+            status: McpServerStartupState::Ready,
+            error: None,
+            failure_reason: None,
+        });
+        widget.maybe_request_next_prompt_prediction(
+            "completed-turn".into(),
+            PredictionTrigger::CatchUp,
+        );
+        let request = std::iter::from_fn(|| events.try_recv().ok())
+            .find_map(|event| {
+                if let AppEvent::RequestNextPromptPrediction { request } = event {
+                    Some(request)
+                } else {
+                    None
                 }
-                if name == "alpha" {
-                    assert!(
-                        requests.is_empty(),
-                        "the remaining MCP server is still pending"
-                    );
-                }
-            }
-            assert_eq!(requests.len(), 1);
-            assert!(widget.next_prompt_prediction_is_current(&requests[0]));
-        }
+            })
+            .expect("cached MCP servers must not block independent composer predictions");
+        assert!(widget.next_prompt_prediction_is_current(&request));
+        widget.on_mcp_server_status_updated(McpServerStatusUpdatedNotification {
+            thread_id: widget.thread_id.map(|id| id.to_string()),
+            name: "remote".into(),
+            status: McpServerStartupState::Starting,
+            error: None,
+            failure_reason: None,
+        });
+        assert!(
+            widget.next_prompt_prediction_is_current(&request),
+            "MCP startup must not cancel prediction"
+        );
+        widget.on_task_started();
+        assert!(
+            request.cancellation.is_cancelled(),
+            "a real main turn must cancel prediction"
+        );
     }
 
     #[tokio::test]
@@ -221,39 +179,6 @@ mod tests {
                 "a null or sampled-out result must not be sampled again"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn next_prompt_prediction_resume_waits_for_mcp_startup() {
-        let (mut widget, _, mut events, _) =
-            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
-        widget.thread_id = Some(ThreadId::new());
-        widget.turn_lifecycle.last_turn_id = Some("completed-turn".into());
-        widget.mcp_startup_status = Some(HashMap::new());
-        widget.update_task_running_state();
-        widget.maybe_request_next_prompt_prediction(
-            "completed-turn".into(),
-            PredictionTrigger::CatchUp,
-        );
-        while let Ok(event) = events.try_recv() {
-            assert!(!matches!(
-                event,
-                AppEvent::RequestNextPromptPrediction { .. }
-            ));
-        }
-        widget.finish_mcp_startup(Vec::new(), Vec::new());
-        let mut requests = Vec::new();
-        while let Ok(event) = events.try_recv() {
-            if let AppEvent::RequestNextPromptPrediction { request } = event {
-                requests.push(request);
-            }
-        }
-        assert_eq!(
-            requests.len(),
-            1,
-            "catch-up must not be lost during MCP initialization"
-        );
-        assert!(widget.next_prompt_prediction_is_current(&requests[0]));
     }
 
     #[tokio::test]
@@ -371,7 +296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_prompt_prediction_deferred_startup_respects_drafts_and_new_turns() {
+    async fn next_prompt_prediction_during_mcp_respects_drafts_and_new_turns() {
         for draft in [true, false] {
             let (mut widget, _, mut events, _) =
                 crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
@@ -383,6 +308,15 @@ mod tests {
                 "completed-turn".into(),
                 PredictionTrigger::CatchUp,
             );
+            let request = std::iter::from_fn(|| events.try_recv().ok())
+                .find_map(|event| {
+                    if let AppEvent::RequestNextPromptPrediction { request } = event {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                })
+                .expect("MCP startup must allow the idle prediction");
             if draft {
                 widget
                     .bottom_pane
@@ -391,6 +325,7 @@ mod tests {
                 widget.turn_lifecycle.last_turn_id = Some("next-turn".into());
                 widget.on_task_started();
             }
+            assert!(!widget.next_prompt_prediction_is_current(&request));
             widget.finish_mcp_startup(Vec::new(), Vec::new());
             assert!(
                 !std::iter::from_fn(|| events.try_recv().ok())

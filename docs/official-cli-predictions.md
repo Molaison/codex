@@ -10,14 +10,14 @@ This is a community CLI integration, not an upstream-supported CLI feature. Its 
 | --- | --- |
 | A live turn completes successfully | Request a live prediction once while the composer is empty and idle. |
 | A completed conversation is resumed or replayed | Request catch-up only for the latest completed turn. |
-| MCP startup is pending during resume, including before its first status arrives | Defer the completion until configured servers settle, then recheck the thread, turn, draft, queue, and input state. |
+| MCP startup is pending or cached servers send no startup notification | Generate independently while the main turn is idle; preserve MCP input/queue behavior. Tool status changes do not cancel predictions. |
 | Duplicate completion or snapshot for the same turn | Keep the original request; do not cancel, resend, or resample it in the same widget. |
 | New turn, typing, paste, modal, thread switch, or disconnect | Cancel or reject obsolete results. A fresh reconnect may request catch-up again. |
 | Draft, queued work, Plan mode, active goal, failed/interrupted turn | Do not insert a prediction. |
 | Official sampling skips the request or the model returns `null` | Show nothing. Do not retry to defeat sampling. |
 | Missing/expired login, ineligible account/model, unavailable backend | Fail closed. No API or ordinary ChatGPT inference fallback. |
 
-Official sampling controls whether an eligible trigger actually produces a request. A successful prediction may also return no suggestion. Stable event handling does not promise a visible suggestion after every reply. The deduplication state is local to the current TUI widget, not a cross-process cache.
+Official sampling controls whether an eligible trigger actually produces a request. A successful prediction may also return no suggestion. Stable event handling does not promise a visible suggestion after every reply. The deduplication state is local to the current TUI widget, not a cross-process cache. History replay also deduplicates stable item identities, preserving the prompt positions used to edit earlier input when snapshots overlap live notifications.
 
 ## Authentication and request boundary
 
@@ -76,9 +76,9 @@ Then run the build and installation steps above. Applying a source patch is fast
 
 ## GitHub workflow
 
-The **Official CLI predictions** workflow automatically runs the eight offline authentication/protocol boundary cases on branch pushes. They use mocks and send no real requests. Manual dispatch can additionally run Rust regressions and build a downloadable Linux CLI artifact with a SHA256 file. It needs no account token, API key, or desktop companion. The artifact does not contain a login or the proprietary companion.
+The **Official CLI predictions** workflow automatically runs the nine offline authentication/protocol boundary cases on branch pushes. They use mocks and send no real requests. Manual dispatch can additionally run Rust regressions and build a downloadable Linux CLI artifact with a SHA256 file. It needs no account token, API key, or desktop companion. The artifact does not contain a login or the proprietary companion.
 
-The local 2026-10-16 verification passed all 61 tests selected by `test(next_prompt_prediction) | test(mcp_startup)`, including 15 prediction tests, plus the eight offline boundary cases. The first-MCP-status regression failed before the fix: replay could schedule a prediction before the first startup notification, which then cancelled it. The test covers both known and not-yet-populated expected-server state.
+The local 2026-10-16 integration verification passed 83 tests covering predictions, MCP startup, history pagination, prompt receipt identity, and editing earlier prompts, plus nine offline boundary cases. A new regression failed before the fix: cached MCP servers did not emit startup events, so the previous gate could wait indefinitely. Predictions now use their own main-task busy state, while the normal MCP composer/queue state is preserved. Starting a main turn or disabling input still cancels prediction. The offline suite also verifies that an unreachable official configuration endpoint starts no backend and performs no inference fallback.
 
 An earlier broader 79-test replay/MCP/reconnect run passed 77; two version-banner snapshots also failed identically on the unpatched upstream release source. They are `reconnect_allows_slow_hydration_but_bounds_a_stalled_server` and `reconnect_daemon_command_center_after_socket_replacement_without_a_conversation`. Their snapshots were not changed to hide those failures. This is not a claim that the complete upstream suite passed.
 

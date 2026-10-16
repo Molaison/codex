@@ -8,6 +8,7 @@ import pathlib
 import tempfile
 import time
 import types
+import urllib.error
 import unittest.mock as mock
 
 module = types.ModuleType('official_prediction')
@@ -53,6 +54,8 @@ with tempfile.TemporaryDirectory() as temporary:
             return process
         opener = mock.Mock()
         opener.open.return_value = io.BytesIO(json.dumps(config).encode())
+        if case == 'configuration_unreachable':
+            opener.open.side_effect = urllib.error.URLError('synthetic network failure')
         output = io.StringIO()
         failure = None
         with mock.patch.object(module.sys, 'stdin', types.SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode() + b'\n'))), \
@@ -61,7 +64,7 @@ with tempfile.TemporaryDirectory() as temporary:
              mock.patch.dict(os.environ, {'OPENAI_API_KEY': 'forbidden-api-key', 'CODEX_API_KEY': 'forbidden-key', 'OPENAI_BASE_URL': 'http://forbidden.invalid'}):
             try:
                 module.main()
-            except RuntimeError as error:
+            except (RuntimeError, urllib.error.URLError) as error:
                 failure = str(error)
         messages = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
         turns = [row for row in messages if row.get('method') == 'turn/start']
@@ -83,12 +86,12 @@ with tempfile.TemporaryDirectory() as temporary:
             assert json.loads(output.getvalue()) == {'suggestion': None}
         else:
             assert failure and not turns, (case, failure, turns)
-            if case in ('api_login', 'expired', 'disabled'):
+            if case in ('api_login', 'expired', 'disabled', 'configuration_unreachable'):
                 assert not spawn.called
         assert (root / 'auth.json').read_bytes() == original
         assert not list(root.glob('companion-*'))
         passed.append(case)
-    for case in ('success', 'catch_up_success', 'catch_up_skipped', 'api_login', 'expired', 'disabled', 'fork_unavailable', 'wrong_fork_provider'):
+    for case in ('success', 'catch_up_success', 'catch_up_skipped', 'api_login', 'expired', 'disabled', 'fork_unavailable', 'wrong_fork_provider', 'configuration_unreachable'):
         run(case)
 report = {'passed': passed, 'network_requests': 0, 'inference_requests': 0, 'auth_unchanged': True, 'temporary_credentials_cleaned': True}
 print(json.dumps(report))

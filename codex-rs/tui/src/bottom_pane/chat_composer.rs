@@ -620,6 +620,7 @@ pub(crate) struct ChatComposer {
     next_prompt_prediction: crate::next_prompt_prediction::ComposerPrediction,
     blocks_direct_input: bool,
     is_task_running: bool,
+    prediction_blocked_by_task: bool,
     queue_submissions: bool,
     /// Slash-command draft staged for local recall after application-level dispatch.
     ///
@@ -797,6 +798,7 @@ impl ChatComposer {
             blocks_direct_input: false,
             next_prompt_prediction: crate::next_prompt_prediction::ComposerPrediction::default(),
             is_task_running: false,
+            prediction_blocked_by_task: false,
             queue_submissions: false,
             pending_slash_command_history: None,
             skills: None,
@@ -1143,7 +1145,7 @@ impl ChatComposer {
         (self.is_empty()
             && self.draft.input_enabled
             && !self.blocks_direct_input
-            && !self.is_task_running
+            && !self.prediction_blocked_by_task
             && !self.popup_active())
         .then(|| self.next_prompt_prediction.begin())
     }
@@ -1153,7 +1155,7 @@ impl ChatComposer {
             && self.is_empty()
             && self.draft.input_enabled
             && !self.blocks_direct_input
-            && !self.is_task_running
+            && !self.prediction_blocked_by_task
             && !self.popup_active()
     }
 
@@ -1961,7 +1963,7 @@ impl ChatComposer {
 
         if key_hint::plain(KeyCode::Tab).is_press(key_event)
             && self.is_empty()
-            && !self.is_task_running
+            && !self.prediction_blocked_by_task
             && !self.popup_active()
             && let Some(suggestion) = self.next_prompt_prediction.suggestion().map(str::to_owned)
         {
@@ -4312,6 +4314,14 @@ impl ChatComposer {
             self.cancel_next_prompt_prediction();
         }
         self.is_task_running = running;
+        self.prediction_blocked_by_task = running;
+    }
+
+    // The isolated prediction backend does not use the conversation's MCP tools.
+    // Keep their normal composer/queue state without cancelling an idle prediction.
+    pub(crate) fn set_mcp_startup_running(&mut self) {
+        self.is_task_running = true;
+        self.prediction_blocked_by_task = false;
     }
 
     pub(crate) fn set_queue_submissions(&mut self, queue_submissions: bool) {
@@ -4951,7 +4961,9 @@ impl ChatComposer {
             let text = if self.draft.input_enabled {
                 self.next_prompt_prediction
                     .suggestion()
-                    .filter(|_| self.is_empty() && !self.is_task_running && !self.popup_active())
+                    .filter(|_| {
+                        self.is_empty() && !self.prediction_blocked_by_task && !self.popup_active()
+                    })
                     .map(|suggestion| format!("[Tab] {suggestion}"))
                     .unwrap_or_else(|| self.placeholder_text.clone())
             } else {
@@ -5107,6 +5119,26 @@ mod tests {
         assert!(redraw);
         assert_eq!(composer.draft.textarea.text(), "请检查边界条件");
         assert_eq!(composer.next_prompt_prediction.suggestion(), None);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn next_prompt_prediction_mcp_startup_renders_and_accepts_without_submitting() {
+        let (mut composer, mut events) = new_test_composer();
+        composer.set_mcp_startup_running();
+        let (id, cancellation) = composer.begin_next_prompt_prediction().unwrap();
+        composer.set_mcp_startup_running();
+        assert!(!cancellation.is_cancelled());
+        composer.complete_next_prompt_prediction(id, Some("Compare the examples".into()));
+        let area = Rect::new(0, 0, 100, 6);
+        let mut buffer = Buffer::empty(area);
+        composer.render(area, &mut buffer);
+        let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(screen.contains("[Tab] Compare the examples"), "{screen}");
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::None));
+        assert_eq!(composer.draft.textarea.text(), "Compare the examples");
         assert!(events.try_recv().is_err());
     }
 

@@ -1321,9 +1321,21 @@ impl BottomPane {
     // esc_backtrack_hint_visible removed; hints are controlled internally.
 
     pub fn set_task_running(&mut self, running: bool) {
+        self.set_task_running_inner(running, /*agent_task*/ true);
+    }
+
+    pub(crate) fn set_mcp_startup_running(&mut self) {
+        self.set_task_running_inner(/*running*/ true, /*agent_task*/ false);
+    }
+
+    fn set_task_running_inner(&mut self, running: bool, agent_task: bool) {
         let was_running = self.is_task_running;
         self.is_task_running = running;
-        self.composer.set_task_running(running);
+        if agent_task {
+            self.composer.set_task_running(running);
+        } else {
+            self.composer.set_mcp_startup_running();
+        }
 
         if running {
             if !was_running {
