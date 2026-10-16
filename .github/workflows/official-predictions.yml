@@ -1,0 +1,86 @@
+name: Official CLI predictions
+
+on:
+  push:
+    branches: [feature/official-cli-predictions]
+  pull_request:
+    branches: [feature/official-cli-predictions]
+  workflow_dispatch:
+    inputs:
+      rust_tests:
+        description: Run the Rust prediction and affected lifecycle tests
+        type: boolean
+        default: true
+      build_release:
+        description: Build a Linux CLI artifact after tests (no companion or login bundled)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: official-predictions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  authentication-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Check authentication, official sampling, and absence of fallback
+        run: python3 scripts/test_official_predictions.py
+      - name: Check patch whitespace
+        run: git diff --check HEAD^
+
+  linux-tests-and-build:
+    if: github.event_name == 'workflow_dispatch' && (inputs.rust_tests || inputs.build_release)
+    needs: authentication-boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "8388608"
+      NEXTEST_PROFILE: local
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+      - name: Normalize release-tag workspace versions in the lockfile
+        working-directory: codex-rs
+        run: cargo update --workspace
+      - name: Run prediction, history replay, and MCP startup regressions
+        working-directory: codex-rs
+        run: cargo nextest run --locked -p codex-tui --lib -E 'test(next_prompt_prediction) | test(replay_thread_snapshot) | test(mcp_startup)'
+      - name: Build release CLI
+        if: inputs.build_release
+        working-directory: codex-rs
+        run: |
+          cargo build --release --locked -p codex-cli --bin codex
+          target/release/codex --version
+          cd target/release
+          sha256sum codex > codex.sha256
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: inputs.build_release
+        with:
+          name: codex-official-predictions-linux-x86_64
+          path: |
+            codex-rs/target/release/codex
+            codex-rs/target/release/codex.sha256
+            docs/official-cli-predictions.md
+          if-no-files-found: error
+          retention-days: 14
