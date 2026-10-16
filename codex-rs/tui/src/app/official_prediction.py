@@ -75,6 +75,7 @@ def main():
     if not isinstance(rate, (int, float)) or not 0 <= rate <= 1:
         raise RuntimeError("Invalid official prediction sampling configuration")
     if rate < 1 and __import__("random").random() >= rate:
+        print("sampled_out", file=sys.stderr, flush=True)
         print(json.dumps({"suggestion": None}), flush=True)
         return
     prompt = prediction_config["prompt"]

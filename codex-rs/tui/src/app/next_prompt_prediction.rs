@@ -50,13 +50,21 @@ impl App {
         let codex_home = self.chat_widget.config_ref().codex_home.to_path_buf();
         let model = self.chat_widget.current_model().to_string();
         let event_sender = self.app_event_tx.clone();
+        tracing::info!(thread_id = %request.thread_id, turn_id = %request.turn_id, trigger = request.trigger.as_str(),
+            "Official CLI prediction queued");
         tokio::spawn(async move {
             tokio::select! {
-                _ = request.cancellation.cancelled() => return,
+                _ = request.cancellation.cancelled() => {
+                    tracing::info!(thread_id = %request.thread_id, turn_id = %request.turn_id, "Official CLI prediction cancelled");
+                    return;
+                },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {}
             }
             let result = tokio::select! {
-                _ = request.cancellation.cancelled() => return,
+                _ = request.cancellation.cancelled() => {
+                    tracing::info!(thread_id = %request.thread_id, turn_id = %request.turn_id, "Official CLI prediction cancelled");
+                    return;
+                },
                 result = run_official_prediction(codex_home, model, items, request.thread_id.to_string(), request.turn_id.clone(), request.trigger) => result,
             };
             event_sender.send(AppEvent::NextPromptPredictionGenerated { request, result });
@@ -75,9 +83,14 @@ impl App {
                 None
             }
         };
-        if suggestion.is_some() && self.chat_widget.next_prompt_prediction_is_current(&request) {
+        let current = self.chat_widget.next_prompt_prediction_is_current(&request);
+        if suggestion.is_some() && current {
             tracing::info!(thread_id = %request.thread_id, turn_id = %request.turn_id, trigger = request.trigger.as_str(),
                 "Official ChatGPT composer prediction ready; ywl main provider unchanged");
+        }
+        if suggestion.is_none() || !current {
+            tracing::info!(thread_id = %request.thread_id, turn_id = %request.turn_id, trigger = request.trigger.as_str(), current,
+                "Official CLI prediction has no displayable suggestion");
         }
         self.chat_widget
             .apply_next_prompt_prediction(&request, suggestion);
@@ -138,6 +151,13 @@ async fn run_official_prediction(
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    let outcome = if output.stderr.as_slice() == b"sampled_out\n" {
+        "sampled_out"
+    } else {
+        "completed"
+    };
+    tracing::info!(thread_id = %source_thread_id, turn_id = %source_turn_id, trigger = trigger.as_str(), outcome,
+        "Official CLI prediction backend outcome");
     if output.stdout.len() > 8192 {
         return Err("Official prediction output too large".into());
     }

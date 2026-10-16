@@ -7,6 +7,7 @@ use crate::bottom_pane::RestrictedInputMode;
 
 impl ChatWidget {
     pub(crate) fn pause_for_disconnect(&mut self) {
+        self.reset_next_prompt_prediction();
         self.permission_discovery = None;
         self.invalidate_permission_discovery();
         self.cancel_startup_submission();
@@ -127,6 +128,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn pause_unavailable_thread(&mut self) {
+        self.reset_next_prompt_prediction();
         if let Some(questions) = &mut self.bottom_pane.questions {
             questions.delivery_enabled = false;
         }
