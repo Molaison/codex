@@ -41,9 +41,21 @@ impl ChatWidget {
         {
             return;
         }
-        // Startup can temporarily mark an otherwise idle composer as running.
-        // Retain this completion until startup settles, then recheck every gate.
-        if self.mcp_startup_status.is_some() {
+        // History can arrive before the first MCP status. None then means startup
+        // has not reported yet, not that it finished. Wait for configured servers
+        // too, so their first Ready update cannot cancel an already queued request.
+        let awaiting_initial_mcp = !self.mcp_startup_ignore_updates_until_next_start
+            && self.mcp_startup_expected_servers.as_ref().map_or_else(
+                || {
+                    self.config
+                        .mcp_servers
+                        .get()
+                        .values()
+                        .any(|server| server.enabled)
+                },
+                |servers| !servers.is_empty(),
+            );
+        if self.mcp_startup_status.is_some() || awaiting_initial_mcp {
             if self.bottom_pane.composer_is_empty() {
                 self.prediction_schedule.deferred = Some((thread_id, turn_id, trigger));
             }
@@ -109,6 +121,69 @@ impl ChatWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn next_prompt_prediction_waits_for_first_mcp_status_after_replay() {
+        use codex_app_server_protocol::{
+            McpServerStartupState, McpServerStatusUpdatedNotification,
+        };
+        for expected_known in [false, true] {
+            let (mut widget, _, mut events, _) =
+                crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+            let server: codex_config::types::McpServerConfig =
+                toml::from_str::<toml::Value>("command = 'true'")
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+            widget
+                .config
+                .mcp_servers
+                .set(HashMap::from([
+                    ("alpha".to_string(), server.clone()),
+                    ("beta".to_string(), server),
+                ]))
+                .unwrap();
+            widget.thread_id = Some(ThreadId::new());
+            widget.turn_lifecycle.last_turn_id = Some("completed-turn".into());
+            if expected_known {
+                widget.set_mcp_startup_expected_servers(["alpha".into(), "beta".into()]);
+            }
+            assert!(widget.mcp_startup_status.is_none());
+            widget.maybe_request_next_prompt_prediction(
+                "completed-turn".into(),
+                PredictionTrigger::CatchUp,
+            );
+            assert!(
+                !std::iter::from_fn(|| events.try_recv().ok())
+                    .any(|event| matches!(event, AppEvent::RequestNextPromptPrediction { .. })),
+                "history replay must wait even before the first MCP status arrives",
+            );
+            widget.set_mcp_startup_expected_servers(["alpha".into(), "beta".into()]);
+            let mut requests = Vec::new();
+            for name in ["alpha", "beta"] {
+                widget.on_mcp_server_status_updated(McpServerStatusUpdatedNotification {
+                    thread_id: widget.thread_id.map(|id| id.to_string()),
+                    name: name.into(),
+                    status: McpServerStartupState::Ready,
+                    error: None,
+                    failure_reason: None,
+                });
+                while let Ok(event) = events.try_recv() {
+                    if let AppEvent::RequestNextPromptPrediction { request } = event {
+                        requests.push(request);
+                    }
+                }
+                if name == "alpha" {
+                    assert!(
+                        requests.is_empty(),
+                        "the remaining MCP server is still pending"
+                    );
+                }
+            }
+            assert_eq!(requests.len(), 1);
+            assert!(widget.next_prompt_prediction_is_current(&requests[0]));
+        }
+    }
 
     #[tokio::test]
     async fn next_prompt_prediction_duplicate_completion_keeps_original_request() {

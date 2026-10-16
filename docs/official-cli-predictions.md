@@ -10,7 +10,7 @@ This is a community CLI integration, not an upstream-supported CLI feature. Its 
 | --- | --- |
 | A live turn completes successfully | Request a live prediction once while the composer is empty and idle. |
 | A completed conversation is resumed or replayed | Request catch-up only for the latest completed turn. |
-| MCP startup is still running during resume | Defer the completion, then recheck the thread, turn, draft, queue, and input state when startup settles. |
+| MCP startup is pending during resume, including before its first status arrives | Defer the completion until configured servers settle, then recheck the thread, turn, draft, queue, and input state. |
 | Duplicate completion or snapshot for the same turn | Keep the original request; do not cancel, resend, or resample it in the same widget. |
 | New turn, typing, paste, modal, thread switch, or disconnect | Cancel or reject obsolete results. A fresh reconnect may request catch-up again. |
 | Draft, queued work, Plan mode, active goal, failed/interrupted turn | Do not insert a prediction. |
@@ -60,11 +60,27 @@ Test the new CLI against an idle completed conversation using the same resume co
 
 Set `CODEX_CLI_PREDICTIONS=0` to disable the feature. Restoring the old launcher/executable is the full rollback; no session database migration is involved.
 
+## Apply the standalone patch
+
+The release provides `codex-cli-official-predictions-0.162.1.patch` and its SHA256 file. It contains the feature source, tests, documentation, and CI workflow, and applies to the upstream `rust-v0.162.1` baseline. It excludes the desktop companion and all local credentials/configuration.
+
+```sh
+sha256sum -c codex-cli-official-predictions-0.162.1.patch.sha256
+# In a clean upstream checkout; use the actual downloaded patch path.
+git switch -c local/official-predictions rust-v0.162.1
+git apply --check /path/to/codex-cli-official-predictions-0.162.1.patch
+git apply --index /path/to/codex-cli-official-predictions-0.162.1.patch
+```
+
+Then run the build and installation steps above. Applying a source patch is fast, but it still requires compilation. Keep the feature branch for ongoing upstream merges; use the standalone patch for reproducible application to the documented baseline. Do not apply it blindly to a different release.
+
 ## GitHub workflow
 
 The **Official CLI predictions** workflow automatically runs the eight offline authentication/protocol boundary cases on branch pushes. They use mocks and send no real requests. Manual dispatch can additionally run Rust regressions and build a downloadable Linux CLI artifact with a SHA256 file. It needs no account token, API key, or desktop companion. The artifact does not contain a login or the proprietary companion.
 
-The local 2026-10-16 verification passed 14 prediction tests and the eight offline boundary cases. A broader 79-test replay/MCP/reconnect run passed 77; two version-banner snapshots also failed identically on the unpatched upstream release source. They are `reconnect_allows_slow_hydration_but_bounds_a_stalled_server` and `reconnect_daemon_command_center_after_socket_replacement_without_a_conversation`. Their snapshots were not changed to hide those failures. This is not a claim that the complete upstream suite passed.
+The local 2026-10-16 verification passed all 61 tests selected by `test(next_prompt_prediction) | test(mcp_startup)`, including 15 prediction tests, plus the eight offline boundary cases. The first-MCP-status regression failed before the fix: replay could schedule a prediction before the first startup notification, which then cancelled it. The test covers both known and not-yet-populated expected-server state.
+
+An earlier broader 79-test replay/MCP/reconnect run passed 77; two version-banner snapshots also failed identically on the unpatched upstream release source. They are `reconnect_allows_slow_hydration_but_bounds_a_stalled_server` and `reconnect_daemon_command_center_after_socket_replacement_without_a_conversation`. Their snapshots were not changed to hide those failures. This is not a claim that the complete upstream suite passed.
 
 ## Merge future upstream releases
 
