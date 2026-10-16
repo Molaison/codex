@@ -58,6 +58,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) -> KeyEventAction {
+        if !matches!(key_event.kind, KeyEventKind::Release)
+            && !key_hint::plain(KeyCode::Tab).is_press(key_event)
+        {
+            let dismissed = self.bottom_pane.cancel_next_prompt_prediction();
+            if dismissed && key_hint::plain(KeyCode::Esc).is_press(key_event) {
+                return KeyEventAction::None;
+            }
+        }
         if self.handle_startup_submission_key(key_event) {
             return KeyEventAction::None;
         }

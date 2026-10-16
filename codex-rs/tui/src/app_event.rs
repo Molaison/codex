@@ -353,6 +353,14 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         request_id: Uuid,
     },
+    /// Start an isolated next-message preview for an untouched composer.
+    RequestNextPromptPrediction {
+        request: crate::next_prompt_prediction::PredictionRequest,
+    },
+    NextPromptPredictionGenerated {
+        request: crate::next_prompt_prediction::PredictionRequest,
+        result: Result<String, String>,
+    },
     /// Register a hidden title-generation thread started in the background.
     ThreadTitleStarted {
         cancellation: CancellationToken,

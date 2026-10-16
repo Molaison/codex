@@ -397,6 +397,7 @@ mod transcript_export;
 mod tui_mode_picker;
 mod usage_history;
 use self::transcript::TranscriptState;
+mod next_prompt_prediction;
 mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;

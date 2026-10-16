@@ -715,6 +715,7 @@ impl BottomPane {
     }
 
     fn push_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.cancel_next_prompt_prediction();
         self.view_stack.push(view);
         self.schedule_active_view_frame();
         self.request_redraw();
@@ -997,6 +998,7 @@ impl BottomPane {
     }
 
     pub fn handle_paste(&mut self, pasted: String) {
+        self.cancel_next_prompt_prediction();
         if self.warnings_active() {
             if !pasted.is_empty() {
                 self.record_composer_activity_at(Instant::now());
@@ -1695,6 +1697,37 @@ impl BottomPane {
 
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.composer.is_empty()
+    }
+
+    pub(crate) fn begin_next_prompt_prediction(
+        &mut self,
+    ) -> Option<(uuid::Uuid, tokio_util::sync::CancellationToken)> {
+        if !self.no_modal_or_popup_active() {
+            return None;
+        }
+        self.composer.begin_next_prompt_prediction()
+    }
+
+    pub(crate) fn next_prompt_prediction_is_current(&self, id: uuid::Uuid) -> bool {
+        self.no_modal_or_popup_active() && self.composer.next_prompt_prediction_is_current(id)
+    }
+
+    pub(crate) fn complete_next_prompt_prediction(
+        &mut self,
+        id: uuid::Uuid,
+        suggestion: Option<String>,
+    ) {
+        self.composer
+            .complete_next_prompt_prediction(id, suggestion);
+        self.request_redraw();
+    }
+
+    pub(crate) fn cancel_next_prompt_prediction(&mut self) -> bool {
+        let dismissed = self.composer.cancel_next_prompt_prediction();
+        if dismissed {
+            self.request_redraw();
+        }
+        dismissed
     }
 
     pub(crate) fn composer_is_vim_enabled(&self) -> bool {

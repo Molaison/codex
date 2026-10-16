@@ -2851,6 +2851,12 @@ impl App {
                 self.suggest_thread_name(app_server, thread_id, request_id)
                     .await;
             }
+            AppEvent::RequestNextPromptPrediction { request } => {
+                self.request_next_prompt_prediction(request).await;
+            }
+            AppEvent::NextPromptPredictionGenerated { request, result } => {
+                self.next_prompt_prediction_generated(request, result);
+            }
             AppEvent::ThreadTitleStarted {
                 cancellation,
                 thread_id,

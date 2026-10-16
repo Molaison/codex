@@ -478,6 +478,16 @@ impl ChatWidget {
                     completion,
                     replay_kind.is_some(),
                 );
+                // Replay is synchronous. Earlier requests are cancelled/rejected before
+                // the app handles them, so only the latest completed turn can generate.
+                self.maybe_request_next_prompt_prediction(
+                    notification.turn.id.clone(),
+                    if replay_kind.is_some() {
+                        crate::next_prompt_prediction::PredictionTrigger::CatchUp
+                    } else {
+                        crate::next_prompt_prediction::PredictionTrigger::Live
+                    },
+                );
             }
             TurnStatus::Interrupted => {
                 if replay_kind.is_none() {

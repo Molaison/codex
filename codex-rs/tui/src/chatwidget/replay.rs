@@ -109,6 +109,11 @@ impl ChatWidget {
             self.warning_display_state.startup_complete = true;
         }
         let latest_turn_id = turns.last().map(|turn| turn.id.clone());
+        // Completed history has no turn/started notification. Restore its anchor
+        // before scheduling catch-up so older replayed completions are stale.
+        if latest_turn_id.is_some() {
+            self.turn_lifecycle.last_turn_id = latest_turn_id.clone();
+        }
         let hidden_nested_review_turns = std::iter::once(/*value*/ false)
             .chain(turns.windows(/*size*/ 2).map(|turns| {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])

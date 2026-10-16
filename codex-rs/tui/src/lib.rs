@@ -182,6 +182,7 @@ mod model_migration;
 mod motion;
 mod multi_agents;
 mod named_session_lookup;
+mod next_prompt_prediction;
 mod notifications;
 #[cfg(any(not(debug_assertions), test))]
 mod npm_registry;

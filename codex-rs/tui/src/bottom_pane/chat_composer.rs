@@ -76,6 +76,11 @@
 //! - Local in-session history (full text + text elements + local/remote image attachments).
 //!
 //! Plain-text history recall strips images and their placeholders.
+//!
+//! Next-message predictions are ghost text, never draft contents. Only an idle, empty
+//! composer accepts a result for its current request. Tab copies a visible preview into
+//! the draft without submitting; typing, paste, replacement, a new turn, and modal views
+//! invalidate it. Late results cannot overwrite user text, even after that text is deleted.
 //! When recalling a persistent entry, encoded task links restore atomic elements and bindings.
 //! Recall moves the cursor to the end. Question editors copy primary history on recall/search;
 //! draft capture cancels previews, and restoration resets traversal.
@@ -612,6 +617,7 @@ pub(crate) struct ChatComposer {
     luna_reserve_active: bool,
     attachments: AttachmentState,
     placeholder_text: String,
+    next_prompt_prediction: crate::next_prompt_prediction::ComposerPrediction,
     blocks_direct_input: bool,
     is_task_running: bool,
     queue_submissions: bool,
@@ -789,6 +795,7 @@ impl ChatComposer {
             attachments: AttachmentState::default(),
             placeholder_text,
             blocks_direct_input: false,
+            next_prompt_prediction: crate::next_prompt_prediction::ComposerPrediction::default(),
             is_task_running: false,
             queue_submissions: false,
             pending_slash_command_history: None,
@@ -1130,6 +1137,40 @@ impl ChatComposer {
         self.draft.textarea.is_empty() && !self.draft.is_bash_mode && self.attachments.is_empty()
     }
 
+    pub(crate) fn begin_next_prompt_prediction(
+        &mut self,
+    ) -> Option<(uuid::Uuid, tokio_util::sync::CancellationToken)> {
+        (self.is_empty()
+            && self.draft.input_enabled
+            && !self.blocks_direct_input
+            && !self.is_task_running
+            && !self.popup_active())
+        .then(|| self.next_prompt_prediction.begin())
+    }
+
+    pub(crate) fn next_prompt_prediction_is_current(&self, id: uuid::Uuid) -> bool {
+        self.next_prompt_prediction.is_current(id)
+            && self.is_empty()
+            && self.draft.input_enabled
+            && !self.blocks_direct_input
+            && !self.is_task_running
+            && !self.popup_active()
+    }
+
+    pub(crate) fn complete_next_prompt_prediction(
+        &mut self,
+        id: uuid::Uuid,
+        suggestion: Option<String>,
+    ) {
+        if self.next_prompt_prediction_is_current(id) {
+            self.next_prompt_prediction.complete(id, suggestion);
+        }
+    }
+
+    pub(crate) fn cancel_next_prompt_prediction(&mut self) -> bool {
+        self.next_prompt_prediction.clear()
+    }
+
     /// Record local persistent-history metadata so the composer can navigate
     /// cross-session history.
     pub(crate) fn set_history_metadata(
@@ -1216,6 +1257,7 @@ impl ChatComposer {
     }
 
     pub fn handle_paste_image_path(&mut self, pasted: &str) -> bool {
+        self.cancel_next_prompt_prediction();
         let Some(path_buf) = normalize_pasted_path(pasted) else {
             return false;
         };
@@ -1524,6 +1566,7 @@ impl ChatComposer {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
+        self.cancel_next_prompt_prediction();
         if !self.sparkle.history_preview {
             if local_image_paths.is_empty() {
                 self.note_sparkle_replaced_text(&text);
@@ -1915,6 +1958,18 @@ impl ChatComposer {
         if matches!(key_event.kind, KeyEventKind::Release) {
             return (InputResult::None, false);
         }
+
+        if key_hint::plain(KeyCode::Tab).is_press(key_event)
+            && self.is_empty()
+            && !self.is_task_running
+            && !self.popup_active()
+            && let Some(suggestion) = self.next_prompt_prediction.suggestion().map(str::to_owned)
+        {
+            self.set_text_content(suggestion, Vec::new(), Vec::new());
+            self.move_cursor_to_end();
+            return (InputResult::None, true);
+        }
+        self.cancel_next_prompt_prediction();
 
         if self.history_search.is_none()
             && !self.popups.active()
@@ -4232,6 +4287,9 @@ impl ChatComposer {
 
     #[allow(dead_code)]
     pub(crate) fn set_input_enabled(&mut self, enabled: bool, placeholder: Option<String>) {
+        if !enabled {
+            self.cancel_next_prompt_prediction();
+        }
         self.draft.input_enabled = enabled;
         self.draft.input_disabled_placeholder = if enabled { None } else { placeholder };
 
@@ -4250,6 +4308,9 @@ impl ChatComposer {
     }
 
     pub fn set_task_running(&mut self, running: bool) {
+        if running {
+            self.cancel_next_prompt_prediction();
+        }
         self.is_task_running = running;
     }
 
@@ -4888,7 +4949,11 @@ impl ChatComposer {
         }
         if !self.draft.input_enabled || textarea_is_empty {
             let text = if self.draft.input_enabled {
-                self.placeholder_text.as_str().to_string()
+                self.next_prompt_prediction
+                    .suggestion()
+                    .filter(|_| self.is_empty() && !self.is_task_running && !self.popup_active())
+                    .map(|suggestion| format!("[Tab] {suggestion}"))
+                    .unwrap_or_else(|| self.placeholder_text.clone())
             } else {
                 self.draft
                     .input_disabled_placeholder
@@ -5020,6 +5085,56 @@ mod tests {
             ),
             rx,
         )
+    }
+
+    #[test]
+    fn next_prompt_prediction_tab_fills_draft_without_submitting() {
+        let (mut composer, mut events) = new_test_composer();
+        let (id, _) = composer.begin_next_prompt_prediction().unwrap();
+        composer.complete_next_prompt_prediction(id, Some("请检查边界条件".into()));
+        assert!(composer.is_empty());
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buffer = Buffer::empty(area);
+        composer.render(area, &mut buffer);
+        let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            screen.replace(" ", "").contains("[Tab]请检查边界条件"),
+            "{screen}"
+        );
+        let (result, redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::None));
+        assert!(redraw);
+        assert_eq!(composer.draft.textarea.text(), "请检查边界条件");
+        assert_eq!(composer.next_prompt_prediction.suggestion(), None);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn next_prompt_prediction_typing_then_deleting_rejects_late_result() {
+        let (mut composer, _events) = new_test_composer();
+        composer.set_disable_paste_burst(true);
+        let (id, cancellation) = composer.begin_next_prompt_prediction().unwrap();
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(cancellation.is_cancelled());
+        composer.set_text_content(String::new(), Vec::new(), Vec::new());
+        composer.complete_next_prompt_prediction(id, Some("stale suggestion".into()));
+        assert!(composer.is_empty());
+        assert_eq!(composer.next_prompt_prediction.suggestion(), None);
+    }
+
+    #[test]
+    fn next_prompt_prediction_new_turn_and_disabled_input_cancel_generation() {
+        let (mut composer, _events) = new_test_composer();
+        let (_, first) = composer.begin_next_prompt_prediction().unwrap();
+        composer.set_task_running(true);
+        assert!(first.is_cancelled());
+        assert!(composer.begin_next_prompt_prediction().is_none());
+        composer.set_task_running(false);
+        let (_, second) = composer.begin_next_prompt_prediction().unwrap();
+        composer.set_input_enabled(false, None);
+        assert!(second.is_cancelled());
+        assert!(composer.begin_next_prompt_prediction().is_none());
     }
 
     #[test]

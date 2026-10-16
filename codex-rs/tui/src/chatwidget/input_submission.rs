@@ -136,6 +136,7 @@ impl ChatWidget {
         prepared_images: Option<Vec<UserInput>>,
     ) -> (bool, Option<AppCommand>) {
         self.bottom_pane.dismiss_composer_sparkle();
+        self.bottom_pane.cancel_next_prompt_prediction();
         if self.has_misalignment_policy_violation() {
             return (false, None);
         }
