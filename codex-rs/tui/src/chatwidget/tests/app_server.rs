@@ -2147,3 +2147,33 @@ async fn sqlite_log_write_warning_is_visible_in_warnings() {
         super::helpers::render_bottom_popup(&chat, /*width*/ 80)
     );
 }
+
+#[tokio::test]
+async fn history_sync_receipt_identities_are_scoped_to_the_displayed_thread() {
+    let (mut chat, mut events, _operations) = make_chatwidget_manual(None).await;
+    let first = configured_thread_session(ThreadId::new());
+    chat.handle_thread_session(first.clone());
+    replay_user_message_text(
+        &mut chat,
+        "same-user-id",
+        "go on",
+        ReplayKind::ThreadSnapshot,
+    );
+    drain_insert_history(&mut events);
+    chat.handle_thread_session_quiet(first);
+    replay_user_message_text(
+        &mut chat,
+        "same-user-id",
+        "go on",
+        ReplayKind::ThreadSnapshot,
+    );
+    assert!(drain_insert_history(&mut events).is_empty());
+    chat.handle_thread_session_quiet(configured_thread_session(ThreadId::new()));
+    replay_user_message_text(
+        &mut chat,
+        "same-user-id",
+        "go on",
+        ReplayKind::ThreadSnapshot,
+    );
+    assert_eq!(drain_insert_history(&mut events).len(), 1);
+}

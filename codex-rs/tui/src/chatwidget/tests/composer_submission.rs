@@ -2841,3 +2841,155 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
             });
     }
 }
+
+#[tokio::test]
+async fn history_sync_duplicate_receipts_keep_prompt_edit_ordinals() {
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
+    let (mut chat, mut events, _operations) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let turns = ["failed-compact-1", "failed-compact-2"]
+        .into_iter()
+        .map(|id| Turn {
+            id: id.into(),
+            root_turn_id: None,
+            items: vec![ThreadItem::UserMessage {
+                id: format!("user-{id}"),
+                client_id: Some(format!("client-{id}")),
+                content: vec![UserInput::Text {
+                    text: "go on".into(),
+                    text_elements: Vec::new(),
+                }],
+            }],
+            items_view: TurnItemsView::Full,
+            status: TurnStatus::Failed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        })
+        .collect::<Vec<_>>();
+    chat.replay_thread_turns(turns.clone(), ReplayKind::ResumeInitialMessages);
+    // A resume snapshot may already include receipts queued while it was being read.
+    // Completion clears text-based echo dedupe; repeated text is not an identity.
+    for kind in [None, Some(ReplayKind::ThreadSnapshot)] {
+        for turn in &turns {
+            chat.handle_server_notification(
+                ServerNotification::ItemCompleted(
+                    codex_app_server_protocol::ItemCompletedNotification {
+                        thread_id: chat.thread_id.unwrap().to_string(),
+                        turn_id: turn.id.clone(),
+                        item: turn.items[0].clone(),
+                        completed_at_ms: 0,
+                    },
+                ),
+                kind,
+            );
+            handle_turn_completed(&mut chat, &turn.id, None);
+        }
+    }
+    let cells = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(Arc::from(cell)),
+            _ => None,
+        })
+        .collect::<Vec<Arc<dyn HistoryCell>>>();
+    let count = crate::app_backtrack::user_count(&cells);
+    let mut prompt = UserMessage::from("go on");
+    assert_eq!(
+        crate::app_backtrack::backtrack_revert_before_turn_id(
+            &turns, None, count - 1, &mut prompt,
+        ).expect("a persisted prompt must remain editable after resume receipt overlap"),
+        "failed-compact-2",
+    );
+    assert_eq!(count, 2, "each persisted input must render exactly once");
+}
+
+#[tokio::test]
+async fn history_sync_duplicate_receipt_confirms_recovered_input_without_resending() {
+    let (mut chat, mut events, mut operations) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let receipt =
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: chat.thread_id.unwrap().to_string(),
+            turn_id: "turn".into(),
+            item: ThreadItem::UserMessage {
+                id: "user".into(),
+                client_id: Some("client".into()),
+                content: vec![UserInput::Text {
+                    text: "go on".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            completed_at_ms: 0,
+        });
+    chat.handle_server_notification(receipt.clone(), Some(ReplayKind::ThreadSnapshot));
+    assert_eq!(drain_insert_history(&mut events).len(), 1);
+    chat.input_queue.suppress_queue_autosend = true;
+    chat.input_queue
+        .queued_user_messages
+        .push_back(QueuedUserMessage {
+            delivery: MessageDelivery::Unconfirmed(Some("client".into())),
+            ..QueuedUserMessage::from(UserMessage::from("go on"))
+        });
+    chat.input_queue
+        .queued_user_message_history_records
+        .push_back(UserMessageHistoryRecord::UserMessageText);
+    handle_turn_completed(&mut chat, "turn", None);
+    drain_insert_history(&mut events);
+    chat.handle_server_notification(receipt, None);
+    assert!(chat.input_queue.queued_user_messages.is_empty());
+    assert!(
+        chat.input_queue
+            .queued_user_message_history_records
+            .is_empty()
+    );
+    assert!(drain_insert_history(&mut events).is_empty());
+    assert_no_submit_op(&mut operations);
+}
+
+#[tokio::test]
+async fn history_sync_prompt_revert_retains_only_prefix_receipt_identities() {
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
+    let (mut chat, mut events, _operations) = make_chatwidget_manual(None).await;
+    let turn = |id: &str| Turn {
+        id: id.into(),
+        root_turn_id: None,
+        items: vec![ThreadItem::UserMessage {
+            id: format!("user-{id}"),
+            client_id: None,
+            content: vec![UserInput::Text {
+                text: "go on".into(),
+                text_elements: Vec::new(),
+            }],
+        }],
+        items_view: TurnItemsView::Full,
+        status: TurnStatus::Completed,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    };
+    let first = turn("first");
+    let second = turn("second");
+    chat.replay_thread_turns(
+        vec![first.clone(), second.clone()],
+        ReplayKind::ThreadSnapshot,
+    );
+    assert_eq!(drain_insert_history(&mut events).len(), 2);
+    chat.reset_after_prompt_revert(None, std::slice::from_ref(&first));
+    drain_insert_history(&mut events);
+    chat.replay_thread_turns(vec![first], ReplayKind::ThreadSnapshot);
+    assert!(drain_insert_history(&mut events).is_empty());
+    // Removed identities must not suppress a newly loaded/recreated transcript suffix.
+    chat.replay_thread_turns(vec![second.clone()], ReplayKind::ThreadSnapshot);
+    assert_eq!(drain_insert_history(&mut events).len(), 1);
+    // Older pages are projected outside the widget; later receipts still overlap them.
+    let paged = turn("older-page");
+    chat.remember_user_message_items(std::slice::from_ref(&paged));
+    chat.replay_thread_turns(vec![paged], ReplayKind::ThreadSnapshot);
+    assert!(drain_insert_history(&mut events).is_empty());
+}

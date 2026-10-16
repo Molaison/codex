@@ -7,6 +7,17 @@
 use super::*;
 
 impl ChatWidget {
+    /// Pages projected outside the widget must share receipt identities with live replay.
+    pub(crate) fn remember_user_message_items(&mut self, turns: &[Turn]) {
+        self.seen_user_message_items
+            .extend(turns.iter().flat_map(|turn| {
+                turn.items.iter().filter_map(|item| match item {
+                    ThreadItem::UserMessage { id, .. } => Some((turn.id.clone(), id.clone())),
+                    _ => None,
+                })
+            }));
+    }
+
     /// Restores the active typed reasoning item after a thread switch or session refresh.
     /// Its completion carries the full summary if the bounded event buffer lost earlier deltas.
     pub(crate) fn restore_active_reasoning_item(
@@ -279,7 +290,9 @@ impl ChatWidget {
         let replay_kind = render_source.replay_kind();
         match item {
             ThreadItem::UserMessage {
-                content, client_id, ..
+                id,
+                content,
+                client_id,
             } => {
                 if let Some(replies) = crate::async_question_reply::parse_input(&content) {
                     let ids = replies
@@ -289,6 +302,14 @@ impl ChatWidget {
                     self.bottom_pane.question_editor().resolve_answers(&ids);
                     self.refresh_pending_input_preview();
                     self.request_redraw();
+                }
+                if !self.seen_user_message_items.insert((turn_id.clone(), id)) {
+                    // A receipt may confirm a recovered submission even when its snapshot
+                    // already rendered the input. Never resend it or append another cell.
+                    if !from_replay {
+                        self.reconcile_user_message_receipt(client_id.as_deref());
+                    }
+                    return;
                 }
                 self.on_committed_user_message(
                     &content,

@@ -777,6 +777,9 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     last_rendered_user_message_display: Option<UserMessageDisplay>,
     last_rendered_user_message_client_id: Option<String>,
+    // Snapshot history and buffered/live receipts can contain the same persisted input.
+    // Text and client IDs are not a transcript position; stable item identities are.
+    seen_user_message_items: HashSet<(String, String)>,
     last_non_retry_error: Option<(String, String)>,
     // Keep fixture storage alive until all other widget fields have been dropped.
     #[cfg(test)]
@@ -1361,6 +1364,10 @@ impl ChatWidget {
         {
             self.on_user_message_display(display);
         }
+        self.reconcile_user_message_receipt(client_id);
+    }
+
+    fn reconcile_user_message_receipt(&mut self, client_id: Option<&str>) {
         if let Some(client_id) = client_id
             && self.input_queue.queued_user_messages.iter().any(|message| {
                 matches!(&message.delivery, MessageDelivery::Unconfirmed(Some(id)) if id == client_id)

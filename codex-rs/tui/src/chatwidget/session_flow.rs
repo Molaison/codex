@@ -93,6 +93,7 @@ impl ChatWidget {
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
+            self.seen_user_message_items.clear();
             self.backend_banner_notice_model = None;
             self.automatic_model_switch_state =
                 backend_banners::AutomaticModelSwitchState::default();
@@ -354,6 +355,8 @@ impl ChatWidget {
         self.transcript.last_plan_progress = None;
         self.last_rendered_user_message_display = None;
         self.last_rendered_user_message_client_id = None;
+        self.seen_user_message_items.clear();
+        self.remember_user_message_items(retained_turns);
         self.clear_pending_rate_limit_reset_hint();
         self.set_token_info(/*info*/ None);
         self.bottom_pane.clear_pending_questions();
